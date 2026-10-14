@@ -1,0 +1,66 @@
+x-backend-env: &backend-env
+  DATABASE_URL: postgresql+psycopg://cv:cv@postgres:5432/cv
+  REDIS_URL: redis://redis:6379/0
+  KEYCLOAK_URL: http://keycloak:8080
+  KEYCLOAK_ISSUER: http://localhost:8080/realms/cvapp
+  KEYCLOAK_API_SECRET: cv-api-secret
+  GROQ_API_KEY: ${GROQ_API_KEY:?set GROQ_API_KEY in .env}
+  GROQ_MODEL: ${GROQ_MODEL:-}
+  UPLOAD_DIR: /data/uploads
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment: { POSTGRES_USER: cv, POSTGRES_PASSWORD: cv, POSTGRES_DB: cv }
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+      - ./postgres/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck: { test: ["CMD-SHELL", "pg_isready -U cv"], interval: 5s, retries: 30 }
+
+  redis:
+    image: redis:7-alpine
+    healthcheck: { test: ["CMD", "redis-cli", "ping"], interval: 5s, retries: 30 }
+
+  keycloak:
+    image: quay.io/keycloak/keycloak:26.0
+    command: start-dev --import-realm
+    environment:
+      KC_BOOTSTRAP_ADMIN_USERNAME: kcadmin
+      KC_BOOTSTRAP_ADMIN_PASSWORD: kcadmin
+      KC_DB: postgres
+      KC_DB_URL: jdbc:postgresql://postgres:5432/keycloak
+      KC_DB_USERNAME: cv
+      KC_DB_PASSWORD: cv
+    volumes:
+      - ./keycloak:/opt/keycloak/data/import:ro
+    ports: ["8080:8080"]
+    depends_on: { postgres: { condition: service_healthy } }
+
+  api:
+    build: ./backend
+    command: uvicorn app:app --host 0.0.0.0 --port 8000
+    environment: *backend-env
+    volumes: [uploads:/data/uploads]
+    ports: ["8000:8000"]
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+
+  worker:
+    build: ./backend
+    command: celery -A worker worker --loglevel=info --concurrency=2
+    environment: *backend-env
+    volumes: [uploads:/data/uploads]
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+
+  web:
+    image: node:22-alpine
+    working_dir: /app
+    command: sh -c "npm install && npm run dev -- --host 0.0.0.0"
+    environment: { API_URL: "http://api:8000" }
+    volumes: ["./frontend:/app", "/app/node_modules"]
+    ports: ["5173:5173"]
+
+volumes: { pg_data: {}, uploads: {} }

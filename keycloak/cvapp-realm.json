@@ -1,0 +1,58 @@
+{
+  "realm": "cvapp",
+  "enabled": true,
+  "registrationAllowed": false,
+  "roles": {
+    "realm": [
+      { "name": "admin", "description": "Creates users" },
+      { "name": "user", "description": "Uploads and analyses CVs" }
+    ]
+  },
+  "clients": [
+    {
+      "clientId": "cv-web",
+      "publicClient": true,
+      "standardFlowEnabled": true,
+      "directAccessGrantsEnabled": false,
+      "redirectUris": ["http://localhost:5173/*"],
+      "webOrigins": ["http://localhost:5173"],
+      "attributes": { "pkce.code.challenge.method": "S256", "post.logout.redirect.uris": "+" }
+    },
+    {
+      "clientId": "cv-api",
+      "publicClient": false,
+      "secret": "cv-api-secret",
+      "serviceAccountsEnabled": true,
+      "standardFlowEnabled": false,
+      "directAccessGrantsEnabled": false
+    }
+  ],
+  "users": [
+    {
+      "username": "admin",
+      "email": "admin@example.com",
+      "firstName": "Ada",
+      "lastName": "Admin",
+      "enabled": true,
+      "emailVerified": true,
+      "credentials": [{ "type": "password", "value": "admin123", "temporary": false }],
+      "realmRoles": ["admin"]
+    },
+    {
+      "username": "recruiter",
+      "email": "recruiter@example.com",
+      "firstName": "Riya",
+      "lastName": "Recruiter",
+      "enabled": true,
+      "emailVerified": true,
+      "credentials": [{ "type": "password", "value": "recruiter123", "temporary": false }],
+      "realmRoles": ["user"]
+    },
+    {
+      "username": "service-account-cv-api",
+      "enabled": true,
+      "serviceAccountClientId": "cv-api",
+      "clientRoles": { "realm-management": ["manage-users", "view-users", "query-users", "view-realm"] }
+    }
+  ]
+}
