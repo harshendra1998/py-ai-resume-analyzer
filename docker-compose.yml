@@ -4,7 +4,9 @@ x-backend-env: &backend-env
   KEYCLOAK_URL: http://keycloak:8080
   KEYCLOAK_ISSUER: http://localhost:8080/realms/cvapp
   KEYCLOAK_API_SECRET: cv-api-secret
-  GROQ_API_KEY: ${GROQ_API_KEY:?set GROQ_API_KEY in .env}
+  OLLAMA_URL: http://ollama:11434
+  LLM_MODEL: ${LLM_MODEL:-qwen2.5:3b}
+  GROQ_API_KEY: ${GROQ_API_KEY:-} # optional fallback when Ollama fails
   GROQ_MODEL: ${GROQ_MODEL:-}
   UPLOAD_DIR: /data/uploads
 
@@ -36,6 +38,18 @@ services:
     ports: ["8080:8080"]
     depends_on: { postgres: { condition: service_healthy } }
 
+  ollama:
+    image: ollama/ollama:latest
+    volumes: [ollama:/root/.ollama]
+    healthcheck: { test: ["CMD", "ollama", "list"], interval: 5s, retries: 30 }
+
+  ollama-pull: # one-shot: downloads the model into the ollama volume
+    image: ollama/ollama:latest
+    environment: { OLLAMA_HOST: "ollama:11434" }
+    entrypoint: ["ollama", "pull", "${LLM_MODEL:-qwen2.5:3b}"]
+    restart: on-failure # registry hiccups; pull resumes where it stopped
+    depends_on: { ollama: { condition: service_healthy } }
+
   api:
     build: ./backend
     command: uvicorn app:app --host 0.0.0.0 --port 8000
@@ -54,6 +68,7 @@ services:
     depends_on:
       postgres: { condition: service_healthy }
       redis: { condition: service_healthy }
+      ollama-pull: { condition: service_completed_successfully }
 
   web:
     image: node:22-alpine
@@ -63,4 +78,4 @@ services:
     volumes: ["./frontend:/app", "/app/node_modules"]
     ports: ["5173:5173"]
 
-volumes: { pg_data: {}, uploads: {} }
+volumes: { pg_data: {}, ollama: {}, uploads: {} }

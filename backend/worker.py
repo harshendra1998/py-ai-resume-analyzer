@@ -1,5 +1,7 @@
 import json
+import logging
 import os
+import re
 import subprocess
 
 import docx
@@ -13,7 +15,9 @@ from sqlalchemy import select, update
 from db import ANALYSIS_KEY, cache, cvs, engine
 
 celery = Celery("cv", broker=os.environ["REDIS_URL"])
-GROQ_API_KEY = os.environ["GROQ_API_KEY"]
+OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://ollama:11434")
+LLM_MODEL = os.environ.get("LLM_MODEL") or "qwen2.5:3b"
+GROQ_API_KEY = os.environ.get("GROQ_API_KEY")  # optional fallback when Ollama is down or returns bad JSON
 GROQ_MODEL = os.environ.get("GROQ_MODEL") or "openai/gpt-oss-20b"
 
 PROMPT = """Extract candidate data from the resume below. Reply with JSON only, using exactly these keys:
@@ -25,6 +29,14 @@ PROMPT = """Extract candidate data from the resume below. Reply with JSON only, 
 Use null for anything not present in the resume. Do not invent data.
 
 RESUME:
+"""
+
+JD_PROMPT = """Extract the hiring requirements from the job description below. Reply with JSON only, using exactly these keys:
+{"title": string, "required_skills": [string] (must-have skills, at most 15, short names like "Python"),
+ "nice_to_have_skills": [string] (optional or preferred skills, at most 10),
+ "min_experience_years": number (minimum years of experience asked for, null if not stated)}
+
+JOB DESCRIPTION:
 """
 
 
@@ -52,13 +64,49 @@ def extract_text(path):
     raise ValueError(f"unsupported file type: .{ext}")
 
 
-def llm_extract(text):
+def llm_json(prompt, timeout=600):
+    """Ask the local Ollama model for JSON; fall back to Groq if it fails and a key is set."""
+    messages = [{"role": "user", "content": prompt}]
+    try:
+        r = httpx.post(f"{OLLAMA_URL}/api/chat", timeout=timeout, json={
+            "model": LLM_MODEL, "format": "json", "stream": False,
+            "options": {"temperature": 0, "num_ctx": 8192}, "messages": messages})
+        r.raise_for_status()
+        return json.loads(r.json()["message"]["content"])
+    except (httpx.HTTPError, ValueError, KeyError) as e:
+        if not GROQ_API_KEY:
+            raise
+        logging.warning("Ollama failed (%s), falling back to Groq", e)
     r = httpx.post("https://api.groq.com/openai/v1/chat/completions", timeout=120,
                    headers={"Authorization": f"Bearer {GROQ_API_KEY}"},
                    json={"model": GROQ_MODEL, "temperature": 0, "response_format": {"type": "json_object"},
-                         "messages": [{"role": "user", "content": PROMPT + text[:12000]}]})  # ponytail: truncates very long CVs
+                         "messages": messages})
     r.raise_for_status()
     return json.loads(r.json()["choices"][0]["message"]["content"])
+
+
+def llm_extract(text):
+    return llm_json(PROMPT + text[:12000])  # ponytail: truncates very long CVs
+
+
+def clean_list(raw, limit):
+    """LLM list (or comma string) -> trimmed, case-insensitively de-duplicated strings."""
+    if isinstance(raw, str):
+        raw = raw.split(",")
+    seen, out = set(), []
+    for x in raw or []:
+        x = str(x).strip()
+        if x and x.lower() not in seen:
+            seen.add(x.lower())
+            out.append(x)
+    return out[:limit]
+
+
+def to_float(v):
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return None
 
 
 def to_row(d):
@@ -67,24 +115,73 @@ def to_row(d):
         v = d.get(k)
         return (str(v).strip() or None) if v is not None else None
 
-    raw = d.get("skills") or []
-    if isinstance(raw, str):
-        raw = raw.split(",")
-    seen, skills = set(), []
-    for x in raw:
-        x = str(x).strip()
-        if x and x.lower() not in seen:
-            seen.add(x.lower())
-            skills.append(x)
-    try:
-        exp = float(d.get("experience_years"))
-    except (TypeError, ValueError):
-        exp = None
     return {
         "name": s("name"), "mobile": s("mobile"), "email": s("email"), "location": s("location"),
-        "skills": skills[:25], "experience_years": exp,
+        "skills": clean_list(d.get("skills"), 25), "experience_years": to_float(d.get("experience_years")),
         "details": {k: d.get(k) for k in ("current_title", "education", "companies", "summary")},
     }
+
+
+# ---------- JD matching ----------
+
+def jd_requirements(jd):
+    d = llm_json(JD_PROMPT + jd[:8000], timeout=180)
+    required = clean_list(d.get("required_skills"), 15)
+    taken = {s.lower() for s in required}
+    return {
+        "title": d.get("title"),
+        "required_skills": required,
+        "nice_to_have_skills": [s for s in clean_list(d.get("nice_to_have_skills"), 10) if s.lower() not in taken],
+        "min_experience_years": to_float(d.get("min_experience_years")),
+    }
+
+
+def norm(skill):
+    """'React.js' -> 'react', 'Node JS' -> 'node', 'C++' -> 'c++'."""
+    s = re.sub(r"[^a-z0-9+#]", "", skill.lower())
+    return s[:-2] if s.endswith("js") and len(s) > 4 else s
+
+
+def has_skill(skill, cv_skills, text):
+    """Matches the CV's extracted skills, or the CV text itself (catches skills the LLM left out).
+    Text search is skipped for 1-2 letter skills like 'Go' or 'R', which would match ordinary words."""
+    if norm(skill) in cv_skills:
+        return True
+    return len(skill) >= 3 and re.search(rf"(?<![a-z0-9]){re.escape(skill.lower())}(?![a-z0-9])", text) is not None
+
+
+def score_cv(req, cv):
+    """Fit score 0-100: 60% must-have skills, 10% nice-to-have skills, 30% experience vs. required."""
+    cv_skills, text = {norm(s) for s in cv["skills"]}, (cv["raw_text"] or "").lower()
+    required, nice = req["required_skills"], req["nice_to_have_skills"]
+    matched = [s for s in required if has_skill(s, cv_skills, text)]
+    nice_matched = [s for s in nice if has_skill(s, cv_skills, text)]
+    need, exp = req["min_experience_years"], cv["experience_years"]
+    skill_fit = len(matched) / len(required) if required else 1.0
+    nice_fit = len(nice_matched) / len(nice) if nice else 0.0
+    exp_fit = 1.0 if not need else min((exp or 0) / need, 1.0)
+    return {
+        "id": cv["id"], "name": cv["name"], "email": cv["email"], "mobile": cv["mobile"],
+        "location": cv["location"], "experience_years": exp, "filename": cv["filename"],
+        "current_title": (cv["details"] or {}).get("current_title"),
+        "score": round(100 * (0.6 * skill_fit + 0.1 * nice_fit + 0.3 * exp_fit)),
+        "matched_skills": matched, "missing_skills": [s for s in required if s not in matched],
+        "nice_matched": nice_matched,
+    }
+
+
+def top_matches(req, cvs_rows, n=5):
+    """Best n distinct candidates that have at least one must-have skill (same person uploaded twice counts once)."""
+    scored = sorted((score_cv(req, cv) for cv in cvs_rows),
+                    key=lambda m: (m["score"], m["experience_years"] or 0), reverse=True)
+    out, seen = [], set()
+    for m in scored:
+        who = (m["email"] or m["name"] or str(m["id"])).lower()
+        if who in seen or (req["required_skills"] and not m["matched_skills"]):
+            continue
+        seen.add(who)
+        out.append(m)
+    return out[:n]
 
 
 @celery.task

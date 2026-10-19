@@ -19,7 +19,7 @@ button, .btn { font: inherit; cursor: pointer; border: 1px solid var(--line); ba
 .card h3 { margin: 0 0 12px; font-size: 15px; }
 .toolbar { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
 .search { margin-left: auto; min-width: 260px; }
-input, select { font: inherit; padding: 7px 10px; border: 1px solid var(--line); border-radius: 6px; width: 100%; }
+input, select, textarea { font: inherit; padding: 7px 10px; border: 1px solid var(--line); border-radius: 6px; width: 100%; }
 .toolbar input { width: auto; }
 .muted { color: var(--muted); }
 .small { font-size: 12px; }
@@ -50,7 +50,22 @@ tr.row:hover { background: #fafbfc; }
 .bar b { text-align: right; }
 .form { display: flex; flex-direction: column; gap: 10px; }
 .form label { display: flex; flex-direction: column; gap: 4px; font-size: 13px; color: var(--muted); }
+textarea { resize: vertical; }
+button:disabled { opacity: .6; cursor: wait; }
+.chip.ok { background: #e7f6ec; color: var(--ok); }
+.chip.miss { background: #fdecec; color: var(--bad); }
+.chip.soft { background: #f1f2f4; color: var(--text); }
+.reqs, .cand { margin-top: 16px; }
+.reqs p { margin: 6px 0; }
+.cand { display: grid; grid-template-columns: 48px 1fr 120px; gap: 16px; align-items: center; }
+.rank { font-size: 22px; font-weight: 700; color: var(--accent); }
+.skills-line { margin-top: 8px; }
+.score { text-align: center; }
+.meter { background: var(--line); border-radius: 4px; height: 8px; margin: 4px 0; }
+.meter i { display: block; height: 100%; background: var(--accent); border-radius: 4px; }
 @media (max-width: 720px) {
+  .cand { grid-template-columns: 36px 1fr; }
+  .score { grid-column: 2; text-align: left; }
   main { padding: 16px; }
   .grid, .grid.users { grid-template-columns: 1fr; }
   .search { margin-left: 0; width: 100%; }

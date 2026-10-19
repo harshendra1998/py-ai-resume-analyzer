@@ -2,7 +2,7 @@ import { Fragment, useCallback, useEffect, useState } from "react";
 
 export default function App({ kc, api }) {
   const roles = kc.tokenParsed?.realm_access?.roles ?? [];
-  const tabs = [...(roles.includes("user") ? ["CVs", "Analysis"] : []), ...(roles.includes("admin") ? ["Users"] : [])];
+  const tabs = [...(roles.includes("user") ? ["CVs", "Analysis", "Match JD"] : []), ...(roles.includes("admin") ? ["Users"] : [])];
   const [tab, setTab] = useState(tabs[0]);
 
   return (
@@ -23,6 +23,7 @@ export default function App({ kc, api }) {
         {!tab && <p>Your account has no role yet. Ask an admin to give you the "user" or "admin" role.</p>}
         {tab === "CVs" && <Cvs api={api} />}
         {tab === "Analysis" && <Analysis api={api} />}
+        {tab === "Match JD" && <Match api={api} />}
         {tab === "Users" && <Users api={api} />}
       </main>
     </>
@@ -170,6 +171,80 @@ function Bars({ title, rows, k }) {
         </div>
       )) : <p className="muted">No data yet.</p>}
     </section>
+  );
+}
+
+function Match({ api }) {
+  const [jd, setJd] = useState("");
+  const [res, setRes] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
+
+  const run = async (e) => {
+    e.preventDefault();
+    setBusy(true);
+    setErr("");
+    try {
+      setRes(await api("/match", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ jd }),
+      }));
+    } catch (x) {
+      setErr(x.message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const req = res?.requirements;
+  return (
+    <>
+      <form className="card form" onSubmit={run}>
+        <h3>Find the 5 best-fit candidates for a job</h3>
+        <label>Job description
+          <textarea rows={8} required minLength={30} value={jd} onChange={(e) => setJd(e.target.value)}
+            placeholder="Paste the job description: role, must-have skills, years of experience…" />
+        </label>
+        <button className="btn" disabled={busy}>{busy ? "Reading the JD…" : "Find best matches"}</button>
+        {err && <p className="error">{err}</p>}
+      </form>
+
+      {req && (
+        <section className="card reqs">
+          <h3>{req.title || "Requirements"}</h3>
+          <p><span className="muted">Must have: </span>{req.required_skills.map((s) => <span className="chip" key={s}>{s}</span>)}</p>
+          {!!req.nice_to_have_skills.length && (
+            <p><span className="muted">Nice to have: </span>{req.nice_to_have_skills.map((s) => <span className="chip soft" key={s}>{s}</span>)}</p>
+          )}
+          <p><span className="muted">Experience: </span>{req.min_experience_years != null ? `${req.min_experience_years}+ yrs` : "not stated"}</p>
+        </section>
+      )}
+
+      {res && (res.candidates.length ? res.candidates.map((c, i) => (
+        <section className="card cand" key={c.id}>
+          <div className="rank">#{i + 1}</div>
+          <div className="cand-body">
+            <b>{c.name || c.filename}</b>
+            <span className="muted"> · {[c.current_title, c.location].filter(Boolean).join(" · ")}</span>
+            <div className="muted small">
+              {[c.email, c.mobile, c.experience_years != null && `${c.experience_years} yrs experience`].filter(Boolean).join(" · ")}
+            </div>
+            <div className="skills-line">
+              {c.matched_skills.map((s) => <span className="chip ok" key={s}>✓ {s}</span>)}
+              {c.nice_matched.map((s) => <span className="chip soft" key={s}>+ {s}</span>)}
+              {c.missing_skills.map((s) => <span className="chip miss" key={s}>✗ {s}</span>)}
+            </div>
+          </div>
+          <div className="score">
+            <div className="big">{c.score}</div>
+            <div className="meter" aria-hidden="true"><i style={{ width: `${c.score}%` }} /></div>
+            <div className="muted small">fit score</div>
+          </div>
+        </section>
+      )) : <p className="muted">No parsed CV has any of the must-have skills.</p>)}
+      {res && <p className="muted small">Fit score = 60% must-have skills + 10% nice-to-have skills + 30% experience vs. required.</p>}
+    </>
   );
 }
 

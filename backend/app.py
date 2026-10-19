@@ -1,3 +1,4 @@
+import hashlib
 import json
 import os
 import uuid
@@ -12,7 +13,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import insert, select, text
 
 from db import ANALYSIS_KEY, cache, cvs, engine, meta
-from worker import process_cv
+from worker import jd_requirements, process_cv, top_matches
 
 KC_URL = os.environ["KEYCLOAK_URL"]  # internal URL, e.g. http://keycloak:8080
 REALM = "cvapp"
@@ -176,3 +177,24 @@ def analysis(_=Depends(require("user"))):
         }
     cache.set(ANALYSIS_KEY, json.dumps(out), ex=300)
     return out
+
+
+class MatchRequest(BaseModel):
+    jd: str = Field(min_length=30, max_length=20000)
+
+
+@app.post("/api/match")
+def match(body: MatchRequest, _=Depends(require("user"))):
+    key = "jd:" + hashlib.sha256(body.jd.strip().encode()).hexdigest()  # same JD -> skip the LLM call
+    if hit := cache.get(key):
+        req = json.loads(hit)
+    else:
+        try:
+            req = jd_requirements(body.jd)
+        except Exception as e:
+            raise HTTPException(502, f"Could not read the job description with the LLM: {e}")
+        cache.set(key, json.dumps(req), ex=86400)
+    # ponytail: scores every parsed CV in Python; move the skill filter into SQL past ~10k CVs
+    with engine.connect() as c:
+        rows = c.execute(select(*LIST_COLS, cvs.c.raw_text).where(cvs.c.status == "done")).mappings().all()
+    return {"requirements": req, "candidates": top_matches(req, rows)}
